@@ -10,7 +10,7 @@ on:
 
 env:
   VCPKG_ROOT: ${{ github.workspace }}/submodules/vcpkg
-  VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/submodules/vcpkg/archives,readwrite
+  VCPKG_BINARY_SOURCES: 'clear;nuget,GitHub,readwrite'
   VCPKG_FEATURE_FLAGS: manifests,binarycaching
   VCPKG_CACHE_VERSION: 9
 
@@ -100,13 +100,14 @@ jobs:
       with:
         submodules: recursive
 
-    - name: cache-vcpkg
-      uses: actions/cache@v2.1.4
-      with:
-        key: ${{ hashFiles('.git/modules/submodules/vcpkg/HEAD') }}-${{ hashFiles('vcpkg.json') }}-${{ matrix.triplet }}-${{ env.VCPKG_CACHE_VERSION }}
-        path: |
-          ${{ env.VCPKG_ROOT }}/archives
-          ${{ env.VCPKG_ROOT }}/vcpkg.exe
+    - name: Setup NuGet Credentials
+      run: >
+        nuget sources add
+        -source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+        -storepasswordincleartext
+        -name "GitHub"
+        -username "${{ github.repository_owner }}"
+        -password "${{ secrets.GITHUB_TOKEN }}"
 
     - uses: seanmiddleditch/gha-setup-ninja@v3
     - name: Configure build tools
@@ -123,8 +124,7 @@ jobs:
           -DTF2BD_IS_CI_COMPILE=ON \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_TOOLCHAIN_FILE="${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake" \
-          -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ needs.config.outputs.tf2bd_build_dir }}" \
-          -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG="${{ needs.config.outputs.tf2bd_build_dir }}" \
+          -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="${{ needs.config.outputs.tf2bd_build_dir }}" \
           -DTF2BD_ENABLE_DISCORD_INTEGRATION=${{ matrix.discord_integration }} \
           -DTF2BD_VERSION_BUILD=${{ github.run_number }} \
           ../
@@ -217,13 +217,14 @@ jobs:
       with:
         submodules: recursive
 
-    - name: cache-vcpkg
-      uses: actions/cache@v2.1.4
-      with:
-        key: ${{ hashFiles('.git/modules/submodules/vcpkg/HEAD') }}-${{ hashFiles('tf2_bot_detector_updater/vcpkg.json') }}-${{ matrix.triplet }}-${{ env.VCPKG_CACHE_VERSION }}
-        path: |
-          ${{ env.VCPKG_ROOT }}/archives
-          ${{ env.VCPKG_ROOT }}/vcpkg.exe
+    - name: Setup NuGet Credentials
+      run: >
+        nuget sources add
+        -source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+        -storepasswordincleartext
+        -name "GitHub"
+        -username "${{ github.repository_owner }}"
+        -password "${{ secrets.GITHUB_TOKEN }}"
 
     - uses: seanmiddleditch/gha-setup-ninja@v3
     - name: Configure build tools
@@ -243,8 +244,7 @@ jobs:
           -DVCPKG_LIBRARY_LINKAGE=static \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_TOOLCHAIN_FILE="${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake" \
-          -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE="${{ needs.config.outputs.tf2bd_build_dir }}" \
-          -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG="${{ needs.config.outputs.tf2bd_build_dir }}" \
+          -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="${{ needs.config.outputs.tf2bd_build_dir }}" \
           -DTF2BD_ENABLE_DISCORD_INTEGRATION=${{ matrix.discord_integration }} \
           -DTF2BD_VERSION_BUILD=${{ github.run_number }} \
           ../tf2_bot_detector_updater/

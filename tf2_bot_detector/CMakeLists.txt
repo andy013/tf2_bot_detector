@@ -20,16 +20,16 @@ if (WIN32)
 	target_include_directories(tf2_bot_detector_launcher PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 	target_link_libraries(tf2_bot_detector_launcher PRIVATE tf2_bot_detector)
 	set_target_properties(tf2_bot_detector_launcher PROPERTIES OUTPUT_NAME "tf2_bot_detector")
-	set_property(TARGET tf2_bot_detector_launcher PROPERTY CXX_STANDARD 17)
+	target_compile_features(tf2_bot_detector_launcher PUBLIC cxx_std_17)
 else()
 	add_executable(tf2_bot_detector
 		"Launcher/main.cpp"
 	)
 endif()
 
+target_compile_features(tf2_bot_detector PUBLIC cxx_std_20)
 set_target_properties(tf2_bot_detector PROPERTIES
 	VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/staging"
-	CXX_STANDARD 20
 )
 
 target_compile_definitions(tf2_bot_detector PRIVATE WIN32_LEAN_AND_MEAN)
@@ -95,6 +95,8 @@ target_sources(tf2_bot_detector PRIVATE
 	"Networking/SteamAPI.h"
 	"Networking/SteamAPI.cpp"
 	"Platform/Platform.h"
+	"SetupFlow/AddonManagerPage.h"
+	"SetupFlow/AddonManagerPage.cpp"
 	"SetupFlow/BasicSettingsPage.h"
 	"SetupFlow/BasicSettingsPage.cpp"
 	"SetupFlow/ChatWrappersGeneratorPage.h"
@@ -204,13 +206,18 @@ if (TF2BD_ENABLE_DISCORD_INTEGRATION)
 		"DiscordRichPresence.cpp"
 		"DiscordRichPresence.h"
 	)
+
+	# We really only need this library for one thing in the DRP integration.
+	# Later on it will probably be moved out of this if statement when it is required elsewhere in the code.
+	find_package(cryptopp CONFIG REQUIRED)
+	target_link_libraries(tf2_bot_detector PRIVATE cryptopp-static)
+
 endif()
 
 if (WIN32)
 	INCLUDE_TF2BD_WINRT(tf2_bot_detector)
 endif()
 
-find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(libzip CONFIG REQUIRED)
 find_package(libzippp CONFIG REQUIRED)
@@ -218,6 +225,7 @@ find_package(fmt CONFIG REQUIRED)
 find_package(BZip2 REQUIRED)
 find_package(SQLiteCpp CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
+find_package(cpprestsdk CONFIG REQUIRED)
 
 target_link_libraries(tf2_bot_detector PRIVATE
 	tf2_bot_detector::common
@@ -226,16 +234,13 @@ target_link_libraries(tf2_bot_detector PRIVATE
 	libzip::zip
 	libzippp::libzippp
 	SourceRCON
-	OpenSSL::SSL # cpp-httplib requires openssl
 	nlohmann_json::nlohmann_json
 	fmt::fmt
 	BZip2::BZip2
 	SQLiteCpp
 	ZLIB::ZLIB
+	cpprestsdk::cpprest
 )
-
-find_path(HTTPLIB_PATH NAMES httplib.h)
-target_include_directories(tf2_bot_detector PRIVATE ${HTTPLIB_PATH})
 
 if (TF2BD_ENABLE_TESTS)
 	enable_testing()
@@ -263,5 +268,5 @@ if(TF2BD_ENABLE_CLI_EXE)
 	add_executable(tf2_bot_detector_cli "Launcher/main.cpp")
 	target_include_directories(tf2_bot_detector_cli PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 	target_link_libraries(tf2_bot_detector_cli PRIVATE tf2_bot_detector)
-	set_property(TARGET tf2_bot_detector_cli PROPERTY CXX_STANDARD 17)
+	target_compile_features(tf2_bot_detector_cli PUBLIC cxx_std_17)
 endif()

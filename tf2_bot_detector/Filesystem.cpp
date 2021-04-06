@@ -68,14 +68,10 @@ void Filesystem::Init()
 			DebugLog("Initializing filesystem...");
 
 			m_ExeDir = Platform::GetCurrentExeDir();
-			m_WorkingDir = std::filesystem::current_path();
 			m_LocalAppDataDir = Platform::GetRootLocalAppDataDir() / APPDATA_SUBFOLDER;
 			m_RoamingAppDataDir = Platform::GetRootRoamingAppDataDir() / APPDATA_SUBFOLDER;
 
 			m_SearchPaths.insert(m_SearchPaths.begin(), m_ExeDir);
-
-			if (m_WorkingDir != m_ExeDir)
-				m_SearchPaths.insert(m_SearchPaths.begin(), m_WorkingDir);
 
 			if (!ResolvePath(std::filesystem::path("cfg") / NON_PORTABLE_MARKER, PathUsage::Read).empty())
 			{
@@ -83,13 +79,13 @@ void Filesystem::Init()
 				m_SearchPaths.insert(m_SearchPaths.begin(), m_RoamingAppDataDir);
 				m_IsPortable = false;
 
-				// If we crash, we want our working directory to be somewhere we can write to.
 				if (std::filesystem::create_directories(m_RoamingAppDataDir))
 					DebugLog("Created {}", m_RoamingAppDataDir);
 
 				if (std::filesystem::create_directories(m_LocalAppDataDir))
 					DebugLog("Created {}", m_LocalAppDataDir);
 
+				// If we crash, we want our working directory to be somewhere we can write to.
 				std::filesystem::current_path(m_LocalAppDataDir);
 				DebugLog("Set working directory to {}", m_LocalAppDataDir);
 			}
@@ -98,6 +94,10 @@ void Filesystem::Init()
 				DebugLog("Installation detected as portable.");
 				m_IsPortable = true;
 			}
+
+			m_WorkingDir = std::filesystem::current_path();
+			if (m_WorkingDir != m_ExeDir)
+				m_SearchPaths.insert(m_SearchPaths.begin(), m_WorkingDir);
 
 			{
 				auto legacyPath = Platform::GetLegacyAppDataDir();
@@ -131,6 +131,7 @@ void Filesystem::Init()
 				DebugLog(std::move(initMsg));
 			}
 
+			DebugLog("\tWorkingDir: {}", m_WorkingDir);
 			DebugLog("\tLocalAppDataDir: {}", GetLocalAppDataDir());
 			DebugLog("\tRoamingAppDataDir: {}", GetRoamingAppDataDir());
 			DebugLog("\tTempDir: {}", GetTempDir());
@@ -160,9 +161,12 @@ std::filesystem::path Filesystem::ResolvePath(const std::filesystem::path& path,
 	{
 		if (usage == PathUsage::Read)
 		{
+			std::vector<std::filesystem::path> fullSearchPaths;
+
 			for (const auto& searchPath : m_SearchPaths)
 			{
 				auto fullPath = searchPath / path;
+				fullSearchPaths.push_back(fullPath);
 				if (std::filesystem::exists(fullPath))
 				{
 					assert(fullPath.is_absolute());
@@ -170,7 +174,13 @@ std::filesystem::path Filesystem::ResolvePath(const std::filesystem::path& path,
 				}
 			}
 
-			DebugLogWarning("Unable to find {} in any search path", path);
+			std::string debugMsg = mh::format("Unable to find {} in any search path. Full search paths [{} paths]:",
+				path, fullSearchPaths.size());
+
+			for (const std::filesystem::path& fsp : fullSearchPaths)
+				debugMsg << "\n\t" << fsp;
+
+			DebugLogWarning(debugMsg);
 			return {};
 		}
 		else if (usage == PathUsage::WriteLocal)
@@ -214,7 +224,7 @@ std::string Filesystem::ReadFile(std::filesystem::path path) const try
 }
 catch (...)
 {
-	LogException(MH_SOURCE_LOCATION_CURRENT(), "Filename: {}", path);
+	DebugLogException("Filename: {}", path);
 	throw;
 }
 

@@ -1,14 +1,18 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT 1
 #define CPPHTTPLIB_ZLIB_SUPPORT 1
 
+#include <mh/algorithm/multi_compare.hpp>
 #include <mh/concurrency/thread_pool.hpp>
 #include <mh/error/error_code_exception.hpp>
+#include <mh/text/case_insensitive_string.hpp>
 
+#include "GlobalDispatcher.h"
 #include "HTTPClient.h"
 #include "HTTPHelpers.h"
 
 #pragma warning(push, 1)
-#include <httplib.h>
+#include <cpprest/http_client.h>
+#include <pplawait.h>
 #pragma warning(pop)
 
 using namespace std::chrono_literals;
@@ -23,102 +27,45 @@ namespace
 		std::string GetString(const URL& url) const override;
 		mh::task<std::string> GetStringAsync(URL url) const override;
 
-		uint32_t GetTotalRequestCount() const override { return m_TotalRequestCount; }
+		RequestCounts GetRequestCounts() const override;
 
 	private:
+		mutable std::mutex m_InnerClientMutex;
+		mutable std::map<std::string, std::shared_ptr<web::http::client::http_client>> m_InnerClients;
+		std::shared_ptr<web::http::client::http_client> GetInnerClient(const URL& url) const;
+
 		mutable std::atomic_uint32_t m_TotalRequestCount = 0;
+		mutable std::atomic_uint32_t m_FailedRequestCount = 0;
+
+		// This is a pretty stupid way of implementing this lol, but its easy
+		struct RequestInProgressObj {};
+		struct RequestQueuedObj {};
+		const std::shared_ptr<RequestInProgressObj> m_InProgressRequestCount = std::make_shared<RequestInProgressObj>();
+		const std::shared_ptr<RequestQueuedObj> m_QueuedRequestCount = std::make_shared<RequestQueuedObj>();
 	};
 }
 
-namespace std
+std::string HTTPClientImpl::GetString(const URL& url) const
 {
-	template<> struct is_error_condition_enum<httplib::Error> : true_type {};
+	auto task = GetStringAsync(url);
+	task.wait();
+	return std::move(task.get());
 }
 
-namespace httplib
+std::shared_ptr<web::http::client::http_client> HTTPClientImpl::GetInnerClient(const URL& url) const
 {
-	struct ErrorCategory final : std::error_category
+	std::lock_guard lock(m_InnerClientMutex);
+
+	const std::string schemeHostPort = url.GetSchemeHostPort();
+	if (auto found = m_InnerClients.find(schemeHostPort); found != m_InnerClients.end())
 	{
-		const char* name() const noexcept override { return "httplib::Error"; }
-
-		std::string message(int condition) const override
-		{
-			switch ((Error)condition)
-			{
-			case Error::Success:
-				return "Success";
-
-			case Error::Unknown:
-				return "Unknown error";
-			case Error::Connection:
-				return "Connection error";
-			case Error::BindIPAddress:
-				return "Failed to bind IP address";
-			case Error::Read:
-				return "Failed to read from a socket";
-			case Error::Write:
-				return "Failed to write to a socket";
-			case Error::ExceedRedirectCount:
-				return "Exceeded the maximum number of redirects";
-			case Error::Canceled:
-				return "Request cancelled";
-			case Error::SSLConnection:
-				return "SSL connection error";
-			case Error::SSLServerVerification:
-				return "SSL server verification error";
-			case Error::UnsupportedMultipartBoundaryChars:
-				return "Unsupported multi-part boundary characters";
-
-			default:
-				return "<UNKNOWN ERROR>";
-			}
-		}
-
-	} static const s_ErrorCategory;
-
-	std::error_condition make_error_condition(Error e)
-	{
-		return std::error_condition(static_cast<int>(e), s_ErrorCategory);
+		return found->second;
 	}
-}
-
-std::string HTTPClientImpl::GetString(const URL& url) const try
-{
-	++m_TotalRequestCount;
-
-	httplib::SSLClient client(url.m_Host, url.m_Port);
-	client.set_follow_location(true);
-	client.set_read_timeout(10);
-
-	static const httplib::Headers headers =
+	else
 	{
-		{ "User-Agent", "curl/7.58.0" },
-		{ "Accept-Encoding", "gzip" },
-	};
-
-	const auto startTime = tfbd_clock_t::now();
-	auto response = client.Get(url.m_Path.c_str(), headers);
-	if (!response)
-		throw http_error(response.error(), mh::format("Failed to HTTP GET {}", url));
-
-	if (response->status >= 400 && response->status < 600)
-		throw http_error((HTTPResponseCode)response->status, mh::format("Failed to HTTP GET {}", url));
-
-	const auto duration = tfbd_clock_t::now() - startTime;
-
-	DebugLog("[{}ms] HTTP GET: {}", std::chrono::duration_cast<std::chrono::milliseconds>(duration).count(), url);
-
-	return response->body;
-}
-catch (const http_error&)
-{
-	DebugLogException("{}", url);
-	throw;
-}
-catch (...)
-{
-	LogException("{}", url);
-	throw;
+		auto newClient = std::make_shared<web::http::client::http_client>(utility::conversions::to_string_t(schemeHostPort));
+		return m_InnerClients.emplace(schemeHostPort, newClient).first->second;
+	}
 }
 
 static duration_t GetMinRequestInterval(const URL& url)
@@ -130,6 +77,9 @@ static duration_t GetMinRequestInterval(const URL& url)
 	}
 	else if (url.m_Host == "api.steampowered.com" || url.m_Host == "tf2bd-util.pazer.us")
 	{
+		if (mh::case_insensitive_view(url.m_Path).find("/GetPlayerItems/") != url.m_Path.npos)
+			return 1000ms; // This is a slow/heavily throttled api
+
 		return 100ms;
 	}
 	else if (url.m_Host == "steamcommunity.com")
@@ -143,8 +93,24 @@ static duration_t GetMinRequestInterval(const URL& url)
 mh::task<std::string> HTTPClientImpl::GetStringAsync(URL url) const try
 {
 	auto self = shared_from_this(); // Make sure we don't vanish
+	std::shared_ptr<RequestInProgressObj> inProgressObj;
+	std::shared_ptr<RequestQueuedObj> queuedObj;
 
-	static mh::thread_pool s_HTTPThreadPool(2);
+	const auto SetThrottled = [&](bool throttled)
+	{
+		if (throttled)
+		{
+			queuedObj = m_QueuedRequestCount;
+			inProgressObj.reset();
+		}
+		else
+		{
+			inProgressObj = m_InProgressRequestCount;
+			queuedObj.reset();
+		}
+	};
+
+	SetThrottled(false);
 
 	int32_t retryCount = 0;
 	while (true)
@@ -180,39 +146,85 @@ mh::task<std::string> HTTPClientImpl::GetStringAsync(URL url) const try
 		}
 
 		if (throttleTime != throttle_time_t{})
-			co_await s_HTTPThreadPool.co_delay_until(throttleTime);
+		{
+			SetThrottled(true);
+			co_await GetDispatcher().co_delay_until(throttleTime);
+			SetThrottled(false);
+		}
 
-		// Move to a thread pool thread, do nothing if we're already on one
-		co_await s_HTTPThreadPool.co_add_task();
-
+		auto retryDelayTime = 10s;
 		try
 		{
-			co_return self->GetString(url);
+			try // exceptions are fun and cool and not a code smell
+			{
+				auto requestIndex = ++m_TotalRequestCount;
+
+				auto client = GetInnerClient(url);
+
+				const auto startTime = tfbd_clock_t::now();
+
+				auto response = co_await client->request(web::http::methods::GET, utility::conversions::to_string_t(url.m_Path));
+
+				if (response.status_code() >= 400 && response.status_code() < 600)
+					throw http_error((HTTPResponseCode)response.status_code(), mh::format("Failed to HTTP GET {}", url));
+
+				std::string stringResponse = co_await response.extract_utf8string(true);
+
+				const auto duration = tfbd_clock_t::now() - startTime;
+				DebugLog("[{}ms] HTTP GET #{}: {}", std::chrono::duration_cast<std::chrono::milliseconds>(duration).count(), requestIndex, url);
+
+				co_return std::move(stringResponse);
+			}
+			catch (...)
+			{
+				++m_FailedRequestCount;
+				throw;
+			}
 		}
 		catch (const http_error& e)
 		{
+			const auto PrintRetryWarning = [&](MH_SOURCE_LOCATION_AUTO(location))
+			{
+				DebugLogWarning(location, "HTTP {} on {}, retrying...", (int)e.code().value(), url);
+			};
+
 			if (e.code() == HTTPResponseCode::TooManyRequests && retryCount < 10)
 			{
 				// retry a fair number of times for http 429, some stuff is aggressively throttled
+				PrintRetryWarning();
 			}
-			else if (e.code() == HTTPResponseCode::InternalServerError && retryCount < 3)
+			else if (e.code() == HTTPResponseCode::InternalServerError && retryCount < 5)
 			{
-				// retry a few times for http 500, might be tf2bd-util being broken
+				// retry a few times for http 500-class errors, might be tf2bd-util being broken
+				PrintRetryWarning();
 			}
-			else if (e.code().category() == httplib::s_ErrorCategory && retryCount < 3)
+			else if (mh::any_eq(e.code(), HTTPResponseCode::BadGateway, HTTPResponseCode::ServiceUnavailable))
 			{
-				// retry a few times for unknown cpp-httplib related errors
+				// retry forever for these two (after a slightly longer delay), since they are likely indicitive of an api being temporarily down
+				PrintRetryWarning();
 			}
 			else
 			{
 				throw; // give up
 			}
 		}
+		catch (const web::http::http_exception&)
+		{
+			if (retryCount > 3)
+			{
+				// Give up after a few socket/timeout errors
+				throw;
+			}
+		}
 
 		// Wait and try again
-		co_await s_HTTPThreadPool.co_delay_for(10s);
+		{
+			SetThrottled(true);
+			co_await GetDispatcher().co_delay_for(retryDelayTime);
+			SetThrottled(false);
+		}
 		retryCount++;
-		DebugLog("Retry #{} for {}", retryCount, url);
+		DebugLogWarning("Retry #{} for {}", retryCount, url);
 	}
 }
 catch (const http_error&)
@@ -224,6 +236,17 @@ catch (...)
 {
 	LogException("{}", url);
 	throw;
+}
+
+auto HTTPClientImpl::GetRequestCounts() const -> RequestCounts
+{
+	return RequestCounts
+	{
+		.m_Total = m_TotalRequestCount,
+		.m_Failed = m_FailedRequestCount,
+		.m_InProgress = static_cast<uint32_t>(m_InProgressRequestCount.use_count() - 1),
+		.m_Throttled = static_cast<uint32_t>(m_QueuedRequestCount.use_count() - 1),
+	};
 }
 
 std::shared_ptr<IHTTPClient> tf2_bot_detector::IHTTPClient::Create()
